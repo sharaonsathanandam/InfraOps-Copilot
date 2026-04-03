@@ -1,6 +1,6 @@
 # InfraOps Copilot
 
-InfraOps Autopilot is a hackathon-style IAM automation service that turns Jira access requests into deterministic Terraform changes.
+InfraOps Copilot is a hackathon-style IAM automation service that turns Jira access requests into deterministic Terraform changes.
 
 The project is split into two parts:
 
