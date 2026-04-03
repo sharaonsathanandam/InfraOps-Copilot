@@ -1,0 +1,13 @@
+{
+  "file_path": "main.tf",
+  "action": "UPDATE_BLOCK",
+  "target_identifier": {
+    "block_type": "module",
+    "block_label": "bigquery_viewer_data_engineering"
+  },
+  "mutations": {
+    "attribute": "for_each",
+    "operation": "list_append",
+    "value": "user:abc.xyz@company.com"
+  }
+}
