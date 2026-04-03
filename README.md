@@ -1,4 +1,4 @@
-# InfraOps Autopilot MVP
+# InfraOps Copilot
 
 InfraOps Autopilot is a hackathon-style IAM automation service that turns Jira access requests into deterministic Terraform changes.
 
