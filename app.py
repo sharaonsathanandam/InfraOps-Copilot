@@ -185,9 +185,24 @@ async def handle_jira_webhook(request: Request):
     print(f"Received Webhook for Jira Ticket: {ticket_id}")
 
     # 3. The "Fast-Fail" Safety Check
-    if "iam" not in summary.lower() and "access" not in summary.lower():
-        print(f"Skipping {ticket_id} - Does not appear to be an IAM/Access request.")
-        return {"status": "ignored", "message": "Ignored: Not an IAM request."}
+    # Combine the text so we can search both the title and the body
+    ticket_text = f"{summary} {description}".lower()
+
+    # Define the exact phrases you expect users to type for the PoC repo
+    valid_project_phrases = [
+        "mock-client",
+        "mock-client-poc",
+        "mock-client-poc-repo-final"
+    ]
+
+    # If NONE of the valid phrases are found in the ticket, block it.
+    if not any(phrase in ticket_text for phrase in valid_project_phrases):
+        error_msg = "Project repo not found in Github repository."
+        print(f"Security Guardrail Triggered for {ticket_id}: {error_msg}")
+
+        # Optional: You could even trigger a Jira comment here saying "Project not supported"
+        return {"status": "rejected", "message": error_msg}
+    # ------------------------------
 
     print(f"Ticket {ticket_id} passed validation. Engaging AI Orchestrator...")
 
