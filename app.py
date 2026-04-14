@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from functools import lru_cache
 from typing import Any, Literal, Dict, List
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -31,7 +31,7 @@ class TargetIdentifier(BaseModel):
     action_type: Literal["UPDATE_EXISTING_RESOURCE", "CREATE_NEW_RESOURCE", "UPDATE_MODULE_MAP"] = Field(
         description="Choose how to mutate the file based on the existing code."
     )
-    block_name: str = Field(description="The name of the resource or module block. If CREATE_NEW_RESOURCE, output 'none'.")
+    block_name: str = Field(description="The name of the resource or module block. If CREATE_NEW_RESOURCE, output module label.")
     map_attribute: str = Field(description="If UPDATE_MODULE_MAP, the name of the map variable (e.g., 'iam_bindings'). Otherwise 'none'.")
 
 
@@ -75,7 +75,7 @@ app = FastAPI(title="InfraOps Autopilot", version="0.1.0")
 
 @lru_cache(maxsize=1)
 def get_llm():
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0,google_api_key=api_key )
+    llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0,google_api_key=api_key )
     return llm
 
 def get_repo_context(repo_dir: str) -> str:
@@ -165,10 +165,32 @@ def build_messages(payload: dict[str, Any]) -> list[SystemMessage | HumanMessage
 
 
 @app.post("/webhook")
-async def handle_jira_webhook(payload: dict):
-    description = payload.get("issue", {}).get("fields", {}).get("description", "")
-    summary = payload.get("issue", {}).get("fields", {}).get("summary", "")
-    ticket_id = payload.get("issue", {}).get("key", "Jira-123")  # Fallback for curl tests
+async def handle_jira_webhook(request: Request):
+    # description = payload.get("issue", {}).get("fields", {}).get("description", "")
+    # summary = payload.get("issue", {}).get("fields", {}).get("summary", "")
+    # ticket_id = payload.get("issue", {}).get("key", "Jira-123")  # Fallback for curl tests
+
+    # 1. Catch the incoming JSON payload from Jira
+    payload = await request.json()
+
+    # 2. Extract the data safely
+    try:
+        ticket_id = payload["issue"]["key"]
+        summary = payload["issue"]["fields"]["summary"]
+        description = payload["issue"]["fields"]["description"]
+    except KeyError as e:
+        print(f"Malformed payload from Jira. Missing key: {e}")
+        return {"status": "error", "message": f"Malformed payload missing {e}"}
+
+    print(f"Received Webhook for Jira Ticket: {ticket_id}")
+
+    # 3. The "Fast-Fail" Safety Check
+    if "iam" not in summary.lower() and "access" not in summary.lower():
+        print(f"Skipping {ticket_id} - Does not appear to be an IAM/Access request.")
+        return {"status": "ignored", "message": "Ignored: Not an IAM request."}
+
+    print(f"Ticket {ticket_id} passed validation. Engaging AI Orchestrator...")
+
 
     with tempfile.TemporaryDirectory() as repo_dir:
         try:
@@ -214,7 +236,7 @@ async def handle_jira_webhook(payload: dict):
                - Analyze the specific file you identified in `target_file_path`:
                  - SCENARIO A: If an existing `module` block manages IAM for this target using a map (like `iam_bindings = {{...}}`), set target.action_type = 'UPDATE_MODULE_MAP', target.block_name to the module label, and target.map_attribute to 'iam_bindings'.
                  - SCENARIO B: If an existing native `resource` block exists for this target, set target.action_type = 'UPDATE_EXISTING_RESOURCE' and target.block_name to its label.
-                 - SCENARIO C: If NO block exists for this specific target, set target.action_type = 'CREATE_NEW_RESOURCE' and target.block_name to 'none'.
+                 - SCENARIO C: If NO block exists for this specific target, set target.action_type = 'CREATE_NEW_RESOURCE' and target.block_name to the intended name of the resource (e.g., the exact GCS bucket name, BQ dataset name, or Cloud Run service name). Do not use 'none'.
             """
 
             print("Extracting parameters from Jira ticket.")
@@ -222,6 +244,16 @@ async def handle_jira_webhook(payload: dict):
             # 4. Grab the raw LLM, then attach the Fuzzy Parser schema!
             llm = get_llm().with_structured_output(StructuredTicket)
             extracted_data = llm.invoke(prompt)
+
+
+
+            # --- THE LLM SAFETY SHIELD ---
+            for req in extracted_data.requests:
+                print(req.target.block_name)
+                if req.target.block_name.lower() == "none" or not req.target.block_name:
+                    print(f"AI Orchestration Error: LLM failed to identify the target block name.")
+                    return {"status": "error", "message": "LLM failed to extract target block."}
+            # -----------------------------
 
             if extracted_data.conflict_detected:
                 msg = f"Ticket rejected due to ambiguity: {extracted_data.conflict_reason} Please update the Jira ticket so the summary and description match."
@@ -241,14 +273,19 @@ async def handle_jira_webhook(payload: dict):
 
                 # --- NEW: Day 2 Bootstrapping ---
                 if not os.path.exists(absolute_tf_file_path):
-                    print(f"Bootstrapping new path -> {dynamic_tf_file_path}")
-                    # 1. Create the new folders
+                    print(f"Bootstrapping new path -> {req.target.target_file_path}")
                     os.makedirs(os.path.dirname(absolute_tf_file_path), exist_ok=True)
 
-                    # 2. Create a blank .tf file for the Go engine to parse
+                    # The "Smart" Bootstrap: Give Go what it expects
                     with open(absolute_tf_file_path, "w") as f:
-                        f.write("// IAM Configuration auto-generated by InfraOps Autopilot\n")
-                # --------------------------------
+                        if req.target.action_type == "UPDATE_MODULE_MAP":
+                            # Go expects a module to exist so it can inject inside it.
+                            # We must lay down the skeleton first.
+                            print(f"Injecting module skeleton for {req.target.block_name}...")
+                            f.write(f'module "{req.target.block_name}" {{\n  source = "TBD"\n  access = {{}}\n}}\n')
+                        else:
+                            # Go is creating a top-level resource. A blank file is perfect.
+                            f.write("// IAM Configuration auto-generated by InfraOps Autopilot\n")                # --------------------------------
                 # Default empty payload
                 go_plan = {}
 
@@ -284,22 +321,12 @@ async def handle_jira_webhook(payload: dict):
                         "initial_member": req.member_id
                     }
 
-                    print(f"Instructing Go Engine to CREATE {req.target.block_name} in {dynamic_tf_file_path}")
-                    go_plan = {
-                        "file_path": absolute_tf_file_path,
-                        "action": "CREATE_NEW_TOSET_RESOURCE",
-                        "resource_type": req.terraform_resource_type,
-                        "resource_name": req.target.block_name,
-                        "attributes": req.resource_attributes,
-                        "initial_member": req.member_id
-                    }
-
-                # Don't forget to save plan.json and fire the Go subprocess here!
+                # Save plan.json and fire the Go subprocess here!
                 import json
                 with open(plan_file_path, "w") as f:
                     json.dump(go_plan, f, indent=2)
 
-                print("Firing the Go AST Engine...")
+                print("Starting the Go AST Engine...")
                 try:
                     result = subprocess.run(
                         ["./tf-engine", plan_file_path],
@@ -308,9 +335,9 @@ async def handle_jira_webhook(payload: dict):
                         text=True
                     )
                     if "IDEMPOTENT_SKIP" in result.stdout:
-                        msg = f"No action needed. {extracted_data.member_id} already has the requested access."
+                        msg = f"No action needed. {req.member_id} already has the requested access."
                         print(f"SUCCESS (SKIPPED): {msg}")
-                        return {"status": "success", "message": msg}
+                        continue
 
                 except subprocess.CalledProcessError as e:
                     error_msg = e.stderr if e.stderr else e.stdout
