@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tempfile
+import requests
 from functools import lru_cache
 from typing import Any, Literal, Dict, List
 from fastapi import FastAPI, Request
@@ -164,6 +165,64 @@ def build_messages(payload: dict[str, Any]) -> list[SystemMessage | HumanMessage
     ]
 
 
+def send_chat_notification(ticket_id: str, summary: str, priority: str, pr_url: str):
+    webhook_url = os.getenv("CHAT_WEBHOOK_URL")
+    if not webhook_url:
+        print("No CHAT_WEBHOOK_URL found in .env file.")
+        return
+
+    # The format required by new Teams Power Automate Workflows
+    adaptive_card = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.2",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": "**InfraOps Copilot PR Created**",
+                            "weight": "Bolder",
+                            "size": "Medium"
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Priority:** {priority} | **Ticket:** {ticket_id}",
+                            "wrap": True
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Summary:** {summary}",
+                            "wrap": True
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "type": "Action.OpenUrl",
+                            "title": "Review Pull Request",
+                            "url": pr_url
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(webhook_url, json=adaptive_card, timeout=5)
+        # Force Python to throw an exception if Teams returns a 4xx or 5xx error
+        response.raise_for_status()
+        print("Chat notification sent successfully.")
+    except Exception as e:
+        print(f"Failed to send chat notification: {e}")
+        # Print the exact error message Teams sent back for debugging
+        if 'response' in locals() and hasattr(response, 'text'):
+            print(f"Teams Error Details: {response.text}")
+
+
 @app.post("/webhook")
 async def handle_jira_webhook(request: Request):
     # description = payload.get("issue", {}).get("fields", {}).get("description", "")
@@ -178,6 +237,7 @@ async def handle_jira_webhook(request: Request):
         ticket_id = payload["issue"]["key"]
         summary = payload["issue"]["fields"]["summary"]
         description = payload["issue"]["fields"]["description"]
+        priority = payload["issue"]["fields"]["priority"]
     except KeyError as e:
         print(f"Malformed payload from Jira. Missing key: {e}")
         return {"status": "error", "message": f"Malformed payload missing {e}"}
@@ -381,6 +441,11 @@ async def handle_jira_webhook(request: Request):
 
             success_msg = f"SUCCESS! PR created: {pr.html_url}"
             print(success_msg)
+
+            # --- SEND NOTIFICATION TO TEAMS CHANNEL ---
+            send_chat_notification(ticket_id, summary, priority, pr.html_url)
+            # -------------------------------
+
             return {"status": "success", "message": success_msg, "pr_url": pr.html_url}
 
         except Exception as e:
