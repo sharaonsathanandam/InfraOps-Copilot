@@ -76,7 +76,7 @@ app = FastAPI(title="InfraOps Autopilot", version="0.1.0")
 
 @lru_cache(maxsize=1)
 def get_llm():
-    llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0,google_api_key=api_key )
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0,google_api_key=api_key )
     return llm
 
 def get_repo_context(repo_dir: str) -> str:
@@ -252,7 +252,9 @@ async def handle_jira_webhook(request: Request):
     valid_project_phrases = [
         "mock-client",
         "mock-client-poc",
-        "mock-client-poc-repo-final"
+        "mock-client-poc-repo-final",
+        "mock-data-platform-dev",
+        "mock-data-platform"
     ]
 
     # If NONE of the valid phrases are found in the ticket, block it.
