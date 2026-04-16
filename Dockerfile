@@ -4,6 +4,9 @@ FROM python:3.11-slim
 # Set the working directory inside the container
 WORKDIR /app
 
+# Force Python to stream logs instantly in Docker
+ENV PYTHONUNBUFFERED=1
+
 # Install Git (Crucial for the repository cloning/pushing steps)
 RUN apt-get update && \
     apt-get install -y git && \
